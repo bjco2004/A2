@@ -11,7 +11,7 @@ public class Receiver {
 
         // Make sure argument length of 5 or else print error
         if (args.length < 5) {
-            System.out.println("Usage: java Receiver <sender_ip> <sender_ack_port> <rcv_data_port> <output_file> <RN>");
+            System.out.println("Usage: java Receiver <sender_ip> <sender_ack_port> <rcv_data_port> <output_file> <RN> [window_size]");
             return;
         }
         
@@ -21,6 +21,10 @@ public class Receiver {
         int rcvPort = Integer.parseInt(args[2]); // Listening Port
         String outFile = args[3]; //File to write to
         int RN = Integer.parseInt(args[4]); //Reliability number for chaos engine
+        
+        // Window size - optional, defaults to 1 (Stop-and-Wait)
+        boolean gbn = args.length == 6;
+        int windowSize = gbn ? Integer.parseInt(args[5]) : 1;
 
         // Open socket on receive port
         DatagramSocket socket = new DatagramSocket(rcvPort);
@@ -70,6 +74,35 @@ public class Receiver {
             if (packet.getType() == DSPacket.TYPE_DATA) {
 
                 System.out.println("RECEIVED DATA seq=" + seq + " length=" + packet.getLength());
+
+                // Check if packet is within receive window
+                // Window: expectedSeq to (expectedSeq + windowSize - 1) mod 128
+                boolean inWindow = false;
+                if (windowSize == 1) {
+                    // Stop-and-Wait: only accept exact expectedSeq
+                    inWindow = (seq == expectedSeq);
+                } else {
+                    // GBN: check if seq is within [expectedSeq, expectedSeq + windowSize)
+                    int seqOffset = (seq - expectedSeq + 128) % 128;
+                    inWindow = (seqOffset < windowSize);
+                }
+
+                if (!inWindow) {
+                    // Packet outside window - discard and resend cumulative ACK
+                    System.out.println("PACKET OUTSIDE WINDOW - DISCARDING");
+                    int ackSeq = (expectedSeq + 127) % 128;
+                    DSPacket ack = new DSPacket(DSPacket.TYPE_ACK, ackSeq, null);
+                    ackCount++;
+                    if (!ChaosEngine.shouldDrop(ackCount, RN)) {
+                        socket.send(new DatagramPacket(
+                                ack.toBytes(),
+                                128,
+                                senderAddress,
+                                senderAckPort));
+                        System.out.println("SENT ACK seq=" + ackSeq);
+                    }
+                    continue;
+                }
 
                 if (seq == expectedSeq) {
 
