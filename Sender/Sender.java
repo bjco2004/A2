@@ -170,9 +170,9 @@ public class Sender {
         System.out.println("RECEIVED ACK FOR EOT seq=" + finalAck.getSeqNum());
 
         long endTime = System.currentTimeMillis();
-        double elapsedSeconds = (endTime - startTime) / 1000.0;
+        double elapsedSeconds = (endTime - startTime);
 
-        System.out.printf("Total Transmission Time: %.2f seconds%n", elapsedSeconds);
+        System.out.printf("Total Transmission Time: %.2f ms%n", elapsedSeconds);
 
         socket.close();
     }
