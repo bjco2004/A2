@@ -19,6 +19,18 @@ public class Sender {
 
         boolean gbn = args.length == 6;
         int windowSize = gbn ? Integer.parseInt(args[5]) : 1;
+        
+        // Validate window size for GBN
+        if (gbn) {
+            if (windowSize % 4 != 0) {
+                System.out.println("ERROR: Window size must be a multiple of 4");
+                return;
+            }
+            if (windowSize > 128) {
+                System.out.println("ERROR: Window size must be <= 128");
+                return;
+            }
+        }
 
         InetAddress receiverAddress = InetAddress.getByName(rcvIP);
 
@@ -40,7 +52,7 @@ public class Sender {
 
         DSPacket ack = new DSPacket(dp.getData());
         System.out.println("RECEIVED ACK seq=" + ack.getSeqNum());
-        if (ack.getType() != DSPacket.TYPE_ACK) return;
+        if (ack.getType() != DSPacket.TYPE_ACK) return;  
 
         FileInputStream fis = new FileInputStream(fileName);
 
@@ -60,9 +72,29 @@ public class Sender {
         }
 
         fis.close();
+        
+        // Handle empty file case
+        if (packets.isEmpty()) {
+            int eotSeq = 1;
+            DSPacket eot = new DSPacket(DSPacket.TYPE_EOT, eotSeq, null);
+            socket.send(new DatagramPacket(eot.toBytes(), 128, receiverAddress, rcvPort));
+            System.out.println("SENT EOT seq=" + eotSeq);
+            
+            socket.receive(dp);
+            DSPacket finalAck = new DSPacket(dp.getData());
+            System.out.println("RECEIVED ACK FOR EOT seq=" + finalAck.getSeqNum());
+            
+            long endTime = System.currentTimeMillis();
+            double elapsedSeconds = (endTime - startTime) / 1000.0;
+            System.out.printf("Total Transmission Time: %.2f seconds%n", elapsedSeconds);
+            
+            socket.close();
+            return;
+        }
 
         int base = 0;
         int next = 0;
+        int consecutiveTimeouts = 0;
 
         while (base < packets.size()) {
 
@@ -103,11 +135,23 @@ public class Sender {
 
                 System.out.println("RECEIVED ACK seq=" + ackSeq);
 
-                base = ackSeq;
+                // Update base to (ackSeq + 1) % 128 for cumulative ACKs
+                base = (ackSeq + 1) % 128;
+                
+                // Reset timeout counter on successful ACK
+                consecutiveTimeouts = 0;
 
             } catch (SocketTimeoutException e) {
 
-                System.out.println("TIMEOUT → RESENDING WINDOW");
+                consecutiveTimeouts++;
+                System.out.println("TIMEOUT → RESENDING WINDOW (timeout " + consecutiveTimeouts + " of 3)");
+                
+                // Critical failure: 3 consecutive timeouts for same packet
+                if (consecutiveTimeouts >= 3) {
+                    System.out.println("ERROR: 3 consecutive timeouts. Unable to transfer file.");
+                    socket.close();
+                    return;
+                }
 
                 next = base;
             }
@@ -126,9 +170,9 @@ public class Sender {
         System.out.println("RECEIVED ACK FOR EOT seq=" + finalAck.getSeqNum());
 
         long endTime = System.currentTimeMillis();
+        double elapsedSeconds = (endTime - startTime) / 1000.0;
 
-        System.out.println("Total Transmission Time: " +
-                (endTime - startTime) + " ms");
+        System.out.printf("Total Transmission Time: %.2f seconds%n", elapsedSeconds);
 
         socket.close();
     }
