@@ -1,3 +1,6 @@
+//CP372 Assignment - Sender
+//Caleb Gautreau and Bryce Co
+
 import java.net.*;
 import java.io.*;
 import java.util.*;
@@ -102,83 +105,133 @@ public class Sender {
             return;
         }
 
-        // PHASE 2: DATA TRANSFER LOOP
-        // base = oldest unacknowledged packet index
-        // next = next packet to send
-        int base = 0;
-        int next = 0;
+        if (!gbn) {
+    // STOP-AND-WAIT
+    for (int i = 0; i < packets.size(); i++) {
+        DSPacket p = packets.get(i);
         int consecutiveTimeouts = 0;
 
-        while (base < packets.size()) {
+        while (true) {
+            socket.send(new DatagramPacket(p.toBytes(), 128, receiverAddress, rcvPort));
+            System.out.println("SENT DATA seq=" + p.getSeqNum() + " length=" + p.getLength());
 
-            // Inner loop: send up to windowSize packets starting from base
-            while (next < base + windowSize && next < packets.size()) {
-
-                List<DSPacket> group = new ArrayList<>();
-
-                // For GBN: apply packet permutation to every 4 consecutive packets
-                // This tests the receiver's ability to handle out-of-order delivery
-                if (gbn && next + 3 < packets.size()) {
-
-                    // Group 4 packets together
-                    group.add(packets.get(next));
-                    group.add(packets.get(next + 1));
-                    group.add(packets.get(next + 2));
-                    group.add(packets.get(next + 3));
-
-                    // Permute according to chaos rule: (i, i+1, i+2, i+3) → (i+2, i, i+3, i+1)
-                    group = ChaosEngine.permutePackets(group);
-
-                    for (DSPacket p : group) {
-                        socket.send(new DatagramPacket(p.toBytes(), 128, receiverAddress, rcvPort));
-                        System.out.println("SENT DATA seq=" + p.getSeqNum() + " length=" + p.getLength());
-                    }
-
-                    next += 4;
-
-                } else {
-
-                    // For Stop-and-Wait or remaining packets in GBN: send normally
-                    DSPacket p = packets.get(next);
-                    socket.send(new DatagramPacket(p.toBytes(), 128, receiverAddress, rcvPort));
-                    next++;
-                }
-            }
-
-            // Wait for cumulative ACK from receiver
             try {
-
                 socket.receive(dp);
                 DSPacket recvAck = new DSPacket(dp.getData());
 
-                int ackSeq = recvAck.getSeqNum();
+                if (recvAck.getType() == DSPacket.TYPE_ACK &&
+                    recvAck.getSeqNum() == p.getSeqNum()) {
 
-                System.out.println("RECEIVED ACK seq=" + ackSeq);
-
-                // Update base to (ackSeq + 1) % 128 for cumulative ACKs
-                // This acknowledges all packets up to and including ackSeq
-                base = (ackSeq + 1) % 128;
-                
-                // Reset timeout counter on successful ACK (for critical failure detection)
-                consecutiveTimeouts = 0;
+                    System.out.println("RECEIVED ACK seq=" + recvAck.getSeqNum());
+                    break;
+                }
 
             } catch (SocketTimeoutException e) {
-
-                // ACK not received within timeout period
                 consecutiveTimeouts++;
-                System.out.println("TIMEOUT → RESENDING WINDOW (timeout " + consecutiveTimeouts + " of 3)");
-                
-                // Critical failure: 3 consecutive timeouts for same packet without progress
+                System.out.println("TIMEOUT - RESENDING seq=" + p.getSeqNum()
+                        + " (timeout " + consecutiveTimeouts + " of 3)");
+
                 if (consecutiveTimeouts >= 3) {
                     System.out.println("ERROR: 3 consecutive timeouts. Unable to transfer file.");
                     socket.close();
                     return;
                 }
-
-                // Reset next to base: retransmit entire window
-                next = base;
             }
         }
+    }
+
+} else {
+    // GO-BACK-N
+    int base = 0;
+    int next = 0;
+    int consecutiveTimeouts = 0;
+
+    while (base < packets.size()) {
+
+        while (next < base + windowSize && next < packets.size()) {
+
+            int remaining = Math.min(4, Math.min(base + windowSize - next, packets.size() - next));
+
+            if (remaining == 4) {
+                List<DSPacket> group = new ArrayList<>();
+                group.add(packets.get(next));
+                group.add(packets.get(next + 1));
+                group.add(packets.get(next + 2));
+                group.add(packets.get(next + 3));
+
+                group = ChaosEngine.permutePackets(group);
+
+                for (DSPacket p : group) {
+                    socket.send(new DatagramPacket(p.toBytes(), 128, receiverAddress, rcvPort));
+                    System.out.println("SENT DATA seq=" + p.getSeqNum() + " length=" + p.getLength());
+                }
+
+                next += 4;
+            } else {
+                DSPacket p = packets.get(next);
+                socket.send(new DatagramPacket(p.toBytes(), 128, receiverAddress, rcvPort));
+                System.out.println("SENT DATA seq=" + p.getSeqNum() + " length=" + p.getLength());
+                next++;
+            }
+        }
+
+        try {
+            socket.receive(dp);
+            DSPacket recvAck = new DSPacket(dp.getData());
+
+            if (recvAck.getType() != DSPacket.TYPE_ACK) {
+                continue;
+            }
+
+            int ackSeq = recvAck.getSeqNum();
+            System.out.println("RECEIVED ACK seq=" + ackSeq);
+
+            // Advance base by packet index, not by raw seq number
+            while (base < packets.size() &&
+                   packets.get(base).getSeqNum() != ((ackSeq + 1) % 128)) {
+                base++;
+            }
+
+            // If ACK is for the last outstanding packet currently at base
+            if (base < packets.size() && packets.get(base).getSeqNum() == ((ackSeq + 1) % 128)) {
+                // base already points to first unacked packet
+            } else if (base < packets.size() && packets.get(base).getSeqNum() == ackSeq) {
+                base++;
+            }
+
+            // Better cumulative-ACK advancement
+            while (base < packets.size()) {
+                int pktSeq = packets.get(base).getSeqNum();
+                int distance = (ackSeq - pktSeq + 128) % 128;
+                if (distance < 128 / 2 || pktSeq == ackSeq) {
+                    if (pktSeq == ((ackSeq + 1) % 128)) {
+                        break;
+                    }
+                    base++;
+                    if (pktSeq == ackSeq) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            consecutiveTimeouts = 0;
+
+        } catch (SocketTimeoutException e) {
+            consecutiveTimeouts++;
+            System.out.println("TIMEOUT → RESENDING WINDOW (timeout " + consecutiveTimeouts + " of 3)");
+
+            if (consecutiveTimeouts >= 3) {
+                System.out.println("ERROR: 3 consecutive timeouts. Unable to transfer file.");
+                socket.close();
+                return;
+            }
+
+            next = base;
+        }
+    }
+}
 
         // PHASE 3: TEARDOWN
         // Send End-of-Transfer packet with sequence = (last data seq + 1) % 128
@@ -197,9 +250,9 @@ public class Sender {
 
         // Calculate and print total transmission time in seconds
         long endTime = System.currentTimeMillis();
-        double elapsedSeconds = (endTime - startTime) / 1000.0;
+        double elapsedSeconds = (endTime - startTime);
 
-        System.out.printf("Total Transmission Time: %.2f seconds%n", elapsedSeconds);
+        System.out.printf("Total Transmission Time: %.2f ms%n", elapsedSeconds);
 
         socket.close();
     }
